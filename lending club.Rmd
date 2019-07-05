@@ -1,0 +1,323 @@
+---
+title: "Credit Risk Classification Model - Lending Club Loan Data"
+author: "Rahul Muttathu Sasikumar"
+date: "June 29, 2019"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE , warning = FALSE , message = FALSE)
+```
+
+##{.tabset .tabset-fade}
+### Introduction
+
+```{r, out.width = "1000px", echo=FALSE}
+
+knitr::include_graphics("lending.png")
+
+```
+
+Credit analysis is the method by which one calculates the creditworthiness of a business or organization. In other words, It is the evaluation of the ability of a company to honor its financial obligations. The analysis of credit risk and the decision making for granting loans is one of the most important operations for financial institutions. By taking into account past results, we need to train a model to accurately predict future outcomes. 
+
+### Packages Required
+
+The below packages are used in the analysis.
+
+```{r libraries}
+library(tidyverse)
+library(ggthemes)
+library(corrplot)
+library(GGally)
+library(DT)
+library(caret)
+```
+
+The loan dataset is taken from bank's records about the status of loan defaults and the profile of customers. 
+
+```{r load data}
+# Set the blank spaces to NA's
+loan = read_csv("loan.csv" , na = "")
+
+```
+```{r columns names}
+colnames(loan)
+
+```
+
+
+
+### Data Preparation
+
+The dataset contains of information of age, annual income, grade of employee, home ownership that affect the probability of default of the borrower. The columns we are going to use are namely:
+
+* **loan_status**    : Variable with multiple levels (e.g. Charged off, Current, Default, Fully Paid ...)
+* **loan_amnt**      : Total amount of loan taken
+* **int_rate**       : Loan interset rate
+* **grade**          : Grade of employment
+* **emp_length**     : Duration of employment
+* **home_ownership** : Type of ownership of house
+* **annual_inc**     : Total annual income
+* **term**           : 36-month or 60-month period
+
+
+```{r select columns}
+# Select only the columns mentioned above.
+loan = loan %>%
+        select(loan_status , loan_amnt , int_rate , grade , emp_length , home_ownership , 
+               annual_inc , term)
+loan
+
+```
+
+
+Missing Values:
+```{r NAs}
+sapply(loan , function(x) sum(is.na(x)))
+
+# Remove the 4 rows with missing annual income, 49 rows where home ownership is 'NONE' or 'ANY' and rows where emp_length is 'n/a'.
+
+loan = loan %>%
+        filter(!is.na(annual_inc) , 
+               !(home_ownership %in% c('NONE' , 'ANY')) , 
+               emp_length != 'n/a')
+
+```
+
+
+### Exploratory Data Analysis
+
+* **loan_status** :
+
+```{r loan_status}
+loan %>%
+        count(loan_status) %>%
+        ggplot(aes(x = reorder(loan_status , desc(n)) , y = n , fill = n)) + 
+        geom_col() + 
+        coord_flip() + 
+        labs(x = 'Loan Status' , y = 'Count') +
+        scale_color_gradient_tableau(palette = "Green-Gold")
+        
+
+```
+
+We want to convert this variable to binary (1 for default and 0 for non-default) but we have 10 different levels. Loans with status Current, Late payments, In grace period need to be removed. Therefore, we create a new variable called loan_outcome where
+
+loan_outcome -> 1 if loan_status = 'Charged Off' or 'Default'
+loan_outcome -> 0 if loan_status = 'Fully Paid'
+
+```{r loan_outcome}
+loan = loan %>%
+        mutate(loan_outcome = ifelse(loan_status %in% c('Charged Off' , 'Default') , 
+                                     1, 
+                                     ifelse(loan_status == 'Fully Paid' , 0 , 'No info')
+                                     ))
+
+barplot(table(loan$loan_outcome) , col = 'lightseagreen')
+
+```
+
+
+We will create a new dataset which contains only rows with 0 or 1 in loan_outcome feature for better modelling.
+
+```{r loan2}
+# Create the new dataset by filtering 0's and 1's in the loan_outcome column and remove loan_status column for the modelling
+loan2 = loan %>%
+        select(-loan_status) %>%
+        filter(loan_outcome %in% c(0 , 1))
+
+```
+
+
+Our new dataset contains of **`r nrow(loan2)` rows**.
+
+Let's observe how useful these variables would be for credit risk modelling. It is known that the better the grade the lowest the interest rate. We can nicely visualise this with boxplots.
+
+```{r grade_boxplot}
+ggplot(loan2 , aes(x = grade , y = int_rate , fill = grade)) + 
+        geom_boxplot() + 
+        theme_igray() + 
+        labs(y = 'Interest Rate' , x = 'Grade') +
+        scale_fill_brewer(type = "qual", palette = "Set1")
+
+```
+
+We assume that grade is a great predictor for the volume of non-performing loans. But how many of them did not performed grouped by grade?
+
+```{r grade_barplot}
+table(loan2$grade , factor(loan2$loan_outcome , c(0 , 1) , c('Fully Paid' , 'Default')))
+
+ggplot(loan2 , aes(x = grade , y = ..count.. , fill = factor(loan_outcome , c(1 , 0) , c('Default' , 'Fully Paid')))) + 
+        geom_bar() + 
+        theme(legend.title = element_blank()) +
+        scale_fill_brewer(type = "qual", palette = "Set1")
+
+```
+
+
+Now let's try to find out what impact the annual income of the borrower has on the other variables. 
+
+```{r ann_inc vs loan_amnt}
+ggplot(loan2[sample(244179 , 10000) , ] , aes(x = annual_inc , y = loan_amnt , color = int_rate)) +
+        geom_point(alpha = 0.5 , size = 1.5) + 
+        geom_smooth(se = F , color = 'darkred' , method = 'loess') +
+        xlim(c(0 , 300000)) + 
+        labs(x = 'Annual Income' , y = 'Loan Ammount' , color = 'Interest Rate') +
+        scale_color_gradient_tableau(palette = "Green-Gold")
+
+```
+
+As expected the larger the annual income the larger the demanded ammount by the borrower.
+
+### Data modelling
+
+Modelling Process:
+
+* We created the binary loan_outcome which will be our response variable.
+* We exclude some independent variables in order to make the model simpler.
+* We split the dataset to training set(75%) and testing set(25%) for the validation.
+* We train a model to predict the probability of default.
+
+Because of the binary response variable we can use logistic regression. Rather than modelling the response Y directly, logistic regression models the probability that Y belongs to a particular category, in our case the probability of a non-performing loan. This probability can be computed by the logistic function,
+
+P = exp(b0 + b1X1 + ... + bNXN) / [ 1 + exp(b0 + b1X1 + ... + bNXN) ]
+
+where
+
+* P is the probability of default
+* b0 , b1 , ... , bN are the coefficient estimates
+* N the number of observations
+* X1 , ... , XN are the independent variables
+
+
+```{r log_regr}
+# Split dataset 
+loan2$loan_outcome = as.numeric(loan2$loan_outcome)
+idx = sample(dim(loan2)[1] , 0.75*dim(loan2)[1] , replace = F)
+trainset = loan2[idx , ]
+testset = loan2[-idx , ]
+
+# Fit logistic regression
+glm.model = glm(loan_outcome ~ . , trainset , family = binomial(link = 'logit'))
+summary(glm.model)
+
+```
+
+The coefficients of the following features are **positive**:
+
+1) Loan Ammount
+2) Interest Rate
+3) Home Ownership - Other
+4) Term
+5) The better the grade the more difficult to default
+
+This means the probability of defaulting on the given credit varies directly with these factors. For example more the given ammount of the loan, more the risk of losing credit.
+
+
+The coefficients of the following features are **negative**:
+
+1) Annual Income
+2) Home Ownership - Own
+3) Home Ownership - Rent
+4) Borrowers with 10+ years of experience are more likely to pay their debt
+5) There is no significant difference in the early years of employment
+
+This means that the probability of defaulting is inversely proportional to the factors mentioned above.
+
+
+```{r pred}
+# Prediction on test set
+preds = predict(glm.model , testset , type = 'response')
+
+# Density of probabilities
+ggplot(data.frame(preds) , aes(preds)) + 
+        geom_density(fill = 'lightseagreen' , alpha = 0.4) +
+        labs(x = 'Predicted Probabilities on test set')
+
+
+```
+
+But now let's see how the accuracy, sensitivity and specificity are transformed for given threshold. We can use a threshold of 50% for the posterior probability of default in order to assign an observation to the default class. However, if we are concerned about incorrectly predicting the default status for individuals who default, then we can consider lowering this threshold. So we will consider these three metrics for threshold levels from 1% up to 50%.
+
+```{r acc}
+k = 0
+accuracy = c()
+sensitivity = c()
+specificity = c()
+for(i in seq(from = 0.01 , to = 0.5 , by = 0.01)){
+        k = k + 1
+        preds_binomial = ifelse(preds > i , 1 , 0)
+        confmat = table(testset$loan_outcome , preds_binomial)
+        accuracy[k] = sum(diag(confmat)) / sum(confmat)
+        sensitivity[k] = confmat[1 , 1] / sum(confmat[ , 1])
+        specificity[k] = confmat[2 , 2] / sum(confmat[ , 2])
+}
+```
+
+```{r remove , echo = FALSE}
+rm(confmat , k , i , preds_binomial)
+
+```
+
+
+If we plot our results we get this visualization. 
+
+```{r threshold}
+threshold = seq(from = 0.01 , to = 0.5 , by = 0.01)
+
+data = data.frame(threshold , accuracy , sensitivity , specificity)
+head(data)
+
+# Gather accuracy , sensitivity and specificity in one column
+ggplot(gather(data , key = 'Metric' , value = 'Value' , 2:4) , 
+       aes(x = threshold , y = Value , color = Metric)) + 
+        geom_line(size = 1.5) +
+        scale_fill_brewer(type = "qual", palette = "Set1")
+```
+```{r , echo = FALSE}
+rm(data)
+
+```
+
+A threshold of 25% - 30% seems ideal cause further increase of the cut off percentage does not have significant impact on the accuracy of the model. The Confusion Matrix for cut off point at 30% will be this,
+
+```{r cutoff.30%}
+preds.for.30 = ifelse(preds > 0.3 , 1 , 0)
+confusion_matrix_30 = table(Predicted = preds.for.30 , Actual = testset$loan_outcome)
+confusion_matrix_30
+
+```
+```{r acc2 , echo = FALSE}
+paste('Accuracy :' , round(sum(diag(confusion_matrix_30)) / sum(confusion_matrix_30) , 4))
+
+```
+
+```{r , echo = FALSE}
+rm(preds.for.30)
+
+```
+
+The *ROC (Receiver Operating Characteristics) curve* is a popular graphic for simultaneously displaying the two types of errors for all possible thresholds.
+
+```{r roc}
+library(pROC)
+
+# Area Under Curve
+auc(roc(testset$loan_outcome , preds))
+
+# Plot ROC curve
+plot.roc(testset$loan_outcome , preds , main = "Confidence interval of a threshold" , percent = TRUE , 
+         ci = TRUE , of = "thresholds" , thresholds = "best" , print.thres = "best" , col = 'lightseagreen')
+
+```
+
+
+### Conclusion
+
+A logistic regression model was used to predict the loan status. Different cut off's were used to decide if the loan should be granted or not. Cut off of 30% gave a good accuracy of `r round(sum(diag(confusion_matrix_30)) / sum(confusion_matrix_30)*100 , 2)`%. The decision to set a cut off is arbitrary and higher levels of threshold increases the risk. The Area Under Curve also gives a measure of accuracy, which came out to be `r round(auc(roc(testset$loan_outcome , preds))*100 , 2)`%.
+
+
+
+
